@@ -358,6 +358,29 @@ button.chip:hover { background: var(--ink); color: #fff; }
 .lib-item img { max-width: 100%; max-height: 100%; }
 .lib-item .x { position: absolute; top: -6px; right: -6px; background: #fff; border: 1.5px solid var(--line); border-radius: 50%; width: 24px; height: 24px; padding: 0; font-size: 1rem; }
 
+/* ---------- live cursors + pokes ---------- */
+#cursors { position: absolute; inset: 0; pointer-events: none; z-index: 25; overflow: hidden; }
+.cursor { position: absolute; transition: left .1s linear, top .1s linear, opacity .4s; will-change: left, top; }
+.cursor svg { display: block; filter: drop-shadow(0 1px 2px rgba(0,0,0,.3)); }
+.cursor span {
+  position: absolute; left: 14px; top: 18px; white-space: nowrap;
+  background: var(--c); color: #fff; font-weight: 800; font-size: .75rem;
+  padding: .1rem .5rem; border-radius: 999px; box-shadow: 0 2px 6px -2px rgba(0,0,0,.3);
+}
+.cursor.idle { opacity: .35; }
+.poke-tag {
+  position: fixed; z-index: 101; pointer-events: none; transform: translate(-50%, -150%);
+  background: var(--c); color: #fff; font-weight: 800; font-size: .8rem; padding: .15rem .6rem; border-radius: 999px;
+  animation: pokeUp 1.6s ease-out forwards;
+}
+@keyframes pokeUp { 0% { opacity: 0; transform: translate(-50%, -100%); } 15% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -260%); } }
+.here {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-left: .35rem; vertical-align: middle;
+  background: var(--c); border: 1.5px solid #fff; box-shadow: 0 0 0 1.5px var(--ink); animation: pulse 1.6s ease-in-out infinite;
+}
+.online { font-size: .8rem; font-weight: 800; color: var(--good); align-self: center; white-space: nowrap; }
+@media (max-width: 700px) { .online { display: none; } }
+
 /* ---------- confetti + toasts ---------- */
 .confetti { position: fixed; width: 9px; height: 13px; border-radius: 2px; z-index: 100; pointer-events: none; animation: burst 1.2s cubic-bezier(.2,.7,.4,1) forwards; }
 .confetti.emo { width: auto; height: auto; background: none; font-size: 1.4rem; }

@@ -117,6 +117,7 @@ const ui = {
   modal: null,
   pending: false,
   me: lsGet('giterdun-me'),
+  peers: [],
 };
 
 function parseRoute() {
@@ -168,10 +169,15 @@ function navHTML() {
   const tab = (o) =>
     `<a class="tab ${ui.route === o ? 'on' : ''}" href="#/${o}" style="--tab:${o === 'together' ? 'var(--together)' : s.colors[o]}">${
       o === 'together' ? '💞 Together' : `${esc(s.emoji[o])} ${esc(s.names[o])}`
-    }</a>`;
+    }${ui.peers
+      .filter((p) => p.page === o)
+      .map((p) => `<span class="here" style="--c:${peerColor(p)}" title="${esc(peerName(p))} is here"></span>`)
+      .join('')}</a>`;
+  const online = [...new Set(ui.peers.map(peerName))];
   return `<a class="logo" href="#/together">Giterdun<span>.</span></a>
     <div class="tabs">${tab('a')}${tab('together')}${tab('b')}</div>
     <div class="nav-tools">
+      ${online.length ? `<span class="online" title="Double-click anywhere to send a poke">● ${esc(online.join(' & '))} online</span>` : ''}
       <button type="button" class="btn ghost ${ui.arranging ? 'on' : ''}" data-act="toggleArrange">✨ Stickers</button>
       <button type="button" class="btn ghost icon" data-act="openSettings" aria-label="Settings">⚙️</button>
     </div>`;
@@ -1018,6 +1024,7 @@ const forms = {
     store.put({ id: 'settings', owner: 'shared', type: 'settings', data, created_at: store.get('settings')?.created_at });
     ui.me = fd.me;
     lsSet('giterdun-me', fd.me);
+    trackMe();
     ui.modal = null;
     if (firstTime && !location.hash) location.hash = '#/' + fd.me;
     render(true);
@@ -1101,6 +1108,8 @@ document.addEventListener('drop', (e) => {
 window.addEventListener('hashchange', () => {
   ui.route = parseRoute();
   ui.selected = null;
+  clearCursors();
+  trackMe();
   render(true);
   scrollTo(0, 0);
 });
@@ -1118,6 +1127,131 @@ async function importBackup(file) {
     toast("That file doesn't look like a Giterdun backup.");
   }
 }
+
+/* ================= live cursors + pokes ================= */
+// Positions are measured against #page (x as % of its width, y in px from its top),
+// so a cursor points at the same spot even when your screens are different sizes.
+const POKES = ['💖', '👋', '✨', '🌸', '🙌'];
+const peerName = (p) => (p.who ? S().names[p.who] : 'Someone');
+const peerColor = (p) => (p.who ? S().colors[p.who] : 'var(--together)');
+const cursors = new Map();
+const pageRect = () => $('#page').getBoundingClientRect();
+
+function trackMe() {
+  store.liveTrack({ who: ui.me, page: ui.route });
+}
+function onPeers(list) {
+  const before = JSON.stringify(ui.peers.map((p) => [p.key, p.who, p.page]));
+  ui.peers = list.filter((p) => p && p.key !== store.liveKey);
+  for (const k of cursors.keys()) if (!ui.peers.some((p) => p.key === k && p.page === ui.route)) removeCursor(k);
+  if (JSON.stringify(ui.peers.map((p) => [p.key, p.who, p.page])) !== before) $('#nav').innerHTML = navHTML();
+}
+function showCursor(p) {
+  if (!p || p.page !== ui.route) return removeCursor(p?.key);
+  let c = cursors.get(p.key);
+  if (!c) {
+    const el = document.createElement('div');
+    el.className = 'cursor';
+    el.innerHTML = `<svg viewBox="0 0 20 22" width="20" height="22" aria-hidden="true"><path d="M2 2 L2 18 L6.5 13.8 L9.6 20.5 L12.6 19.1 L9.6 12.6 L16 12.4 Z" fill="var(--c)" stroke="#fff" stroke-width="1.6" stroke-linejoin="round"/></svg><span></span>`;
+    $('#cursors').append(el);
+    c = { el };
+    cursors.set(p.key, c);
+  }
+  c.el.style.setProperty('--c', peerColor(p));
+  c.el.querySelector('span').textContent = peerName(p);
+  c.el.style.left = p.x + '%';
+  c.el.style.top = p.y + 'px';
+  c.el.classList.remove('idle');
+  clearTimeout(c.timer);
+  c.timer = setTimeout(() => c.el.classList.add('idle'), 5000);
+}
+function removeCursor(key) {
+  const c = cursors.get(key);
+  if (!c) return;
+  clearTimeout(c.timer);
+  c.el.remove();
+  cursors.delete(key);
+}
+function clearCursors() {
+  for (const k of [...cursors.keys()]) removeCursor(k);
+}
+function showPoke(p) {
+  if (p.page !== ui.route) return;
+  const r = pageRect();
+  const x = r.left + (p.x / 100) * r.width;
+  const y = r.top + p.y;
+  confetti(x, y, { n: 9, emoji: [p.emoji] });
+  const tag = document.createElement('div');
+  tag.className = 'poke-tag';
+  tag.style.left = x + 'px';
+  tag.style.top = y + 'px';
+  tag.style.setProperty('--c', peerColor(p));
+  tag.textContent = `${p.emoji} ${peerName(p)}`;
+  document.body.append(tag);
+  setTimeout(() => tag.remove(), 1600);
+}
+
+// Send your cursor at most ~12 times a second, and only while someone else is here.
+let lastXY = null;
+let lastSend = 0;
+let sendTimer = 0;
+function sendCursor() {
+  if (!lastXY || !ui.peers.length) return;
+  const r = pageRect();
+  store.liveSend('cursor', {
+    key: store.liveKey,
+    who: ui.me,
+    page: ui.route,
+    x: +(((lastXY[0] - r.left) / r.width) * 100).toFixed(2),
+    y: Math.round(lastXY[1] - r.top),
+  });
+}
+function queueCursor() {
+  if (!ui.peers.length) return;
+  const now = performance.now();
+  if (now - lastSend >= 80) {
+    lastSend = now;
+    sendCursor();
+  } else if (!sendTimer) {
+    sendTimer = setTimeout(() => {
+      sendTimer = 0;
+      lastSend = performance.now();
+      sendCursor();
+    }, 80 - (now - lastSend));
+  }
+}
+const sendGone = () => ui.peers.length && store.liveSend('gone', { key: store.liveKey });
+document.addEventListener(
+  'pointermove',
+  (e) => {
+    if (e.pointerType === 'touch') return;
+    lastXY = [e.clientX, e.clientY];
+    queueCursor();
+  },
+  { passive: true }
+);
+addEventListener('scroll', () => lastXY && queueCursor(), { passive: true });
+document.documentElement.addEventListener('mouseleave', () => {
+  lastXY = null;
+  sendGone();
+});
+document.addEventListener('visibilitychange', () => document.hidden && sendGone());
+document.addEventListener('dblclick', (e) => {
+  if (!$('#app') || $('#app').hidden || ui.arranging) return;
+  if (e.target.closest('input, textarea, select, button, a, label, [data-act], #modal, #drawer, #nav')) return;
+  window.getSelection()?.removeAllRanges();
+  const r = pageRect();
+  const p = {
+    key: store.liveKey,
+    who: ui.me,
+    page: ui.route,
+    x: ((e.clientX - r.left) / r.width) * 100,
+    y: e.clientY - r.top,
+    emoji: POKES[Math.floor(Math.random() * POKES.length)],
+  };
+  showPoke(p);
+  if (ui.peers.length) store.liveSend('poke', p);
+});
 
 /* ================= login + boot ================= */
 function showLogin(msg = '') {
@@ -1167,6 +1301,11 @@ async function start() {
     booted = true;
     store.onChange(scheduleRender);
     store.onError(toast);
+    ui.route = parseRoute();
+    store.liveJoin(
+      { peers: onPeers, cursor: showCursor, gone: (p) => removeCursor(p.key), poke: showPoke },
+      { who: ui.me, page: ui.route }
+    );
   }
   ui.route = parseRoute();
   render(true);

@@ -184,4 +184,77 @@ export const store = {
   onError(fn) {
     errorFns.add(fn);
   },
+
+  /* ---- live presence: cursors, pokes, who's online. Nothing here is saved. ---- */
+  get liveKey() {
+    return liveKey;
+  },
+  liveJoin(handlers, state) {
+    liveH = handlers;
+    liveState = { ...state, key: liveKey };
+    if (configured) {
+      liveCh = sb.channel('giterdun-live', { config: { broadcast: { self: false }, presence: { key: liveKey } } });
+      for (const ev of LIVE_EVENTS) liveCh.on('broadcast', { event: ev }, ({ payload }) => liveH[ev]?.(payload));
+      liveCh
+        .on('presence', { event: 'sync' }, () => {
+          livePeers = new Map(Object.entries(liveCh.presenceState()).map(([k, v]) => [k, v[0]]));
+          emitPeers();
+        })
+        .subscribe((status) => {
+          if (status === 'SUBSCRIBED') {
+            liveReady = true;
+            liveCh.track(liveState);
+          }
+        });
+    } else if ('BroadcastChannel' in window) {
+      // Browser-only mode: tabs of this browser can still see each other (handy for testing).
+      bc = new BroadcastChannel('giterdun-live');
+      bc.onmessage = ({ data: { event, payload } }) => {
+        if (event === 'hello' || event === 'here') {
+          livePeers.set(payload.key, { ...payload, seen: Date.now() });
+          if (event === 'hello') bc.postMessage({ event: 'here', payload: liveState });
+          return emitPeers();
+        }
+        if (event === 'bye') {
+          livePeers.delete(payload.key);
+          return emitPeers();
+        }
+        liveH[event]?.(payload);
+      };
+      liveReady = true;
+      livePeers.set(liveKey, liveState);
+      bc.postMessage({ event: 'hello', payload: liveState });
+      setInterval(() => {
+        bc.postMessage({ event: 'here', payload: liveState });
+        for (const [k, p] of livePeers) if (k !== liveKey && Date.now() - p.seen > 15000) livePeers.delete(k);
+        emitPeers();
+      }, 5000);
+      addEventListener('pagehide', () => bc.postMessage({ event: 'bye', payload: { key: liveKey } }));
+    }
+  },
+  liveTrack(state) {
+    liveState = { ...state, key: liveKey };
+    if (configured) {
+      if (liveReady) liveCh.track(liveState);
+    } else if (bc) {
+      livePeers.set(liveKey, liveState);
+      bc.postMessage({ event: 'here', payload: liveState });
+      emitPeers();
+    }
+  },
+  liveSend(event, payload) {
+    if (!liveReady) return;
+    if (configured) liveCh.send({ type: 'broadcast', event, payload });
+    else bc?.postMessage({ event, payload });
+  },
 };
+
+const LIVE_EVENTS = ['cursor', 'gone', 'poke'];
+const liveKey = uid();
+let liveH = null;
+let liveState = null;
+let liveCh = null;
+let bc = null;
+let liveReady = false;
+let livePeers = new Map();
+const emitPeers = () => liveH?.peers?.([...livePeers.values()]);
