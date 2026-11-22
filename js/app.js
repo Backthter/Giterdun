@@ -766,6 +766,7 @@ function renderDrawer() {
       lib
         .map(
           (l) => `<div class="lib-item"><button type="button" data-act="placeSticker" data-id="${l.id}" aria-label="Place sticker"><img src="${esc(l.data.src)}" alt=""></button>
+        <button type="button" class="lib-edit" data-act="libEdit" data-id="${l.id}" aria-label="Edit sticker (erase, add a border)" title="Edit / add a border">✏️</button>
         <button type="button" class="x" data-act="libDel" data-id="${l.id}" aria-label="Remove from sticker book">×</button></div>`
         )
         .join('') || '<p class="empty">Your sticker book is empty. Upload PNGs or photos you love. You can erase backgrounds as you add them!</p>'
@@ -823,6 +824,13 @@ function cleanupModal() {
       <label class="ed-tol" data-for="magic">How fussy <input type="range" min="2" max="60" value="18" data-ed-tol aria-label="Magic eraser tolerance"><small>less ↔ more</small></label>
       <label class="ed-tol" data-for="brush" hidden>Brush size <input type="range" min="2" max="60" value="14" data-ed-size aria-label="Brush size"></label>
     </div>
+    <div class="ed-tools">
+      <label class="ed-tol">Border <input type="range" min="0" max="8" step="0.5" value="0" data-ed-border aria-label="Border thickness"><small data-ed-border-label>none</small></label>
+      <div class="ed-swatches" role="radiogroup" aria-label="Border colour">${BORDER_COLORS.map(
+        ([c, name], i) =>
+          `<button type="button" class="ed-sw ${i === 0 ? 'on' : ''}" style="--sw:${c}" data-act="edBorderColor" data-c="${c}" role="radio" aria-checked="${i === 0}" aria-label="${name} border"></button>`
+      ).join('')}</div>
+    </div>
     <div class="ed-stage"><div class="ed-wrap"><canvas id="ed-canvas" aria-label="Sticker preview"></canvas><div class="ed-brush" hidden></div></div></div>
     <p class="ed-status muted small" role="status">Magic eraser: click the background to erase everything connected to it that's a similar colour.</p>
     <div class="row between">
@@ -835,14 +843,57 @@ function openCleanup(canvas, name) {
   return new Promise((resolve) => {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const orig = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    ed = { canvas, ctx, orig, undo: [], name, resolve, busy: false, mode: 'magic', painting: null };
+    // The preview canvas has empty padding round the picture so a border has room to show.
+    const pad = Math.ceil((BORDER_MAX / 100) * Math.max(canvas.width, canvas.height)) + 2;
+    ed = { canvas, ctx, orig, undo: [], name, resolve, busy: false, mode: 'magic', painting: null, pad, border: 0, borderColor: BORDER_COLORS[0][0] };
     ui.modalClosed = () => finishCleanup(null);
     openModal(cleanupModal);
     const view = $('#ed-canvas');
-    view.width = canvas.width;
-    view.height = canvas.height;
+    view.width = canvas.width + pad * 2;
+    view.height = canvas.height + pad * 2;
     drawEd();
   });
+}
+
+/* ---------- sticker borders ---------- */
+// Border thickness is a % of the picture's longest side, so it looks the same however big the sticker is.
+const BORDER_MAX = 8;
+const BORDER_COLORS = [
+  ['#ffffff', 'White'],
+  ['#2f2a24', 'Black'],
+  ['#ff8fb1', 'Pink'],
+  ['#ffd84d', 'Yellow'],
+  ['#7ec8e3', 'Blue'],
+];
+const borderPx = (pct, c) => Math.round((pct / 100) * Math.max(c.width, c.height));
+// Classic die-cut outline: stamp a solid-colour silhouette of the shape in a ring around it, then draw the picture on top.
+function addBorder(src, px, color) {
+  const out = document.createElement('canvas');
+  out.width = src.width + px * 2;
+  out.height = src.height + px * 2;
+  const g = out.getContext('2d');
+  if (px > 0) {
+    const sil = document.createElement('canvas');
+    sil.width = src.width;
+    sil.height = src.height;
+    const sg = sil.getContext('2d', { willReadFrequently: true });
+    sg.drawImage(src, 0, 0);
+    // Ignore faint leftover specks so they don't get a border of their own.
+    const img = sg.getImageData(0, 0, sil.width, sil.height);
+    for (let i = 3; i < img.data.length; i += 4) if (img.data[i] < 40) img.data[i] = 0;
+    sg.putImageData(img, 0, 0);
+    sg.globalCompositeOperation = 'source-in';
+    sg.fillStyle = color;
+    sg.fillRect(0, 0, sil.width, sil.height);
+    const steps = Math.max(16, Math.ceil(px * 2.5));
+    for (const rad of [px, px * 0.5])
+      for (let i = 0; i < steps; i++) {
+        const a = (i / steps) * Math.PI * 2;
+        g.drawImage(sil, px + Math.cos(a) * rad, px + Math.sin(a) * rad);
+      }
+  }
+  g.drawImage(src, px, px);
+  return out;
 }
 function finishCleanup(blob) {
   if (!ed) return;
@@ -855,10 +906,15 @@ function finishCleanup(blob) {
   }
   resolve(blob);
 }
-function drawEd() {
+// `fast` skips the border while a brush stroke is in progress, so drawing stays smooth.
+function drawEd(fast = false) {
   const v = $('#ed-canvas');
   if (!ed || !v) return;
-  v.getContext('2d').putImageData(ed.ctx.getImageData(0, 0, ed.canvas.width, ed.canvas.height), 0, 0);
+  const g = v.getContext('2d');
+  g.clearRect(0, 0, v.width, v.height);
+  const px = borderPx(ed.border, ed.canvas);
+  if (px > 0 && !fast) g.drawImage(addBorder(ed.canvas, px, ed.borderColor), ed.pad - px, ed.pad - px);
+  else g.drawImage(ed.canvas, ed.pad, ed.pad);
 }
 const edStatus = (msg) => {
   const s = $('.ed-status');
@@ -911,12 +967,13 @@ function floodErase(img, seeds, tolPct) {
 function edEraseAt(clientX, clientY) {
   const v = $('#ed-canvas');
   const r = v.getBoundingClientRect();
-  const x = Math.floor(((clientX - r.left) / r.width) * v.width);
-  const y = Math.floor(((clientY - r.top) / r.height) * v.height);
-  if (x < 0 || y < 0 || x >= v.width || y >= v.height) return;
+  const { width: w, height: h } = ed.canvas;
+  const x = Math.floor(((clientX - r.left) / r.width) * v.width) - ed.pad;
+  const y = Math.floor(((clientY - r.top) / r.height) * v.height) - ed.pad;
+  if (x < 0 || y < 0 || x >= w || y >= h) return;
   edSnapshot();
-  const img = ed.ctx.getImageData(0, 0, v.width, v.height);
-  floodErase(img, [y * v.width + x], edTolerance());
+  const img = ed.ctx.getImageData(0, 0, w, h);
+  floodErase(img, [y * w + x], edTolerance());
   ed.ctx.putImageData(img, 0, 0);
   drawEd();
   edStatus('');
@@ -996,7 +1053,7 @@ async function edExport(keepBackground) {
     o.width = ed.orig.width;
     o.height = ed.orig.height;
     o.getContext('2d').putImageData(ed.orig, 0, 0);
-    return canvasBlob(toCanvas(o, 420));
+    return canvasBlob(toCanvas(addBorder(o, borderPx(ed.border, ed.canvas), ed.borderColor), 420));
   }
   const { data, width: w, height: h } = ed.ctx.getImageData(0, 0, c.width, c.height);
   let x0 = w, y0 = h, x1 = -1, y1 = -1;
@@ -1013,14 +1070,19 @@ async function edExport(keepBackground) {
   crop.width = x1 - x0 + 1;
   crop.height = y1 - y0 + 1;
   crop.getContext('2d').drawImage(c, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
-  return canvasBlob(toCanvas(crop, 420));
+  return canvasBlob(toCanvas(addBorder(crop, borderPx(ed.border, ed.canvas), ed.borderColor), 420));
 }
 
 // Brushes: Eraser rubs pixels out, Restore paints the original picture back in. Soft edges either way.
 function edCanvasXY(e) {
   const v = $('#ed-canvas');
   const r = v.getBoundingClientRect();
-  return { x: ((e.clientX - r.left) / r.width) * v.width, y: ((e.clientY - r.top) / r.height) * v.height, scale: v.width / r.width, r };
+  return {
+    x: ((e.clientX - r.left) / r.width) * v.width - ed.pad,
+    y: ((e.clientY - r.top) / r.height) * v.height - ed.pad,
+    scale: v.width / r.width,
+    r,
+  };
 }
 const edBrushPx = () => +($('[data-ed-size]')?.value || 14); // radius in on-screen pixels
 function edDab(cx, cy, rad) {
@@ -1055,7 +1117,7 @@ function edStroke(to) {
   for (let s = 1; s <= n; s++) edDab(from.x + ((to.x - from.x) * s) / n, from.y + ((to.y - from.y) * s) / n, p.rad);
   p.last = to;
   ed.ctx.putImageData(ed.work, 0, 0);
-  drawEd();
+  drawEd(true);
 }
 function edMoveBrushRing(e) {
   const ring = $('.ed-brush');
@@ -1090,12 +1152,42 @@ const edStopPaint = () => {
   if (ed?.painting) {
     ed.painting = null;
     ed.work = null;
+    drawEd();
   }
 };
 document.addEventListener('pointerup', edStopPaint);
 document.addEventListener('pointercancel', edStopPaint);
 
 const edActions = {
+  edBorderColor(el) {
+    if (!ed) return;
+    ed.borderColor = el.dataset.c;
+    document.querySelectorAll('[data-act=edBorderColor]').forEach((b) => {
+      b.classList.toggle('on', b === el);
+      b.setAttribute('aria-checked', b === el);
+    });
+    // Picking a colour with no border yet switches on a medium one, so something visibly happens.
+    if (!ed.border) {
+      const slider = $('[data-ed-border]');
+      slider.value = 3;
+      slider.dispatchEvent(new Event('input', { bubbles: true }));
+    } else drawEd();
+  },
+  async libEdit(el) {
+    const l = store.get(el.dataset.id);
+    if (!l || ed) return;
+    try {
+      const bmp = await createImageBitmap(await (await fetch(l.data.src)).blob());
+      const blob = await openCleanup(toCanvas(bmp, 700), l.data.name);
+      if (!blob) return;
+      const src = await store.uploadImage(blob);
+      store.patch(l.id, { src });
+      toast('Sticker updated ✓ (ones already stuck on pages keep their old look)');
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't open that sticker for editing.");
+    }
+  },
   edMode(el) {
     if (!ed) return;
     ed.mode = el.dataset.m;
@@ -1462,6 +1554,12 @@ document.addEventListener('change', (e) => {
 const timers = {};
 document.addEventListener('input', (e) => {
   const el = e.target;
+  if (el.matches('[data-ed-border]') && ed) {
+    ed.border = +el.value;
+    const lbl = $('[data-ed-border-label]');
+    if (lbl) lbl.textContent = ed.border === 0 ? 'none' : ed.border <= 2 ? 'thin' : ed.border <= 5 ? 'medium' : 'chunky';
+    return drawEd();
+  }
   if (!el.dataset.live) return;
   const k = el.dataset.live + el.name;
   clearTimeout(timers[k]);

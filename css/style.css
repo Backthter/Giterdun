@@ -379,6 +379,14 @@ button.chip:hover { background: var(--ink); color: #fff; }
 .ed-brush { position: absolute; border-radius: 50%; border: 2px solid var(--late); box-shadow: 0 0 0 1px #fff; pointer-events: none; }
 .ed-brush.restore { border-color: var(--good); }
 .ed-modes { display: flex; gap: .3rem; flex-wrap: wrap; }
+.ed-swatches { display: flex; gap: .35rem; }
+.ed-sw { width: 26px; height: 26px; border-radius: 50%; padding: 0; cursor: pointer; background: var(--sw); border: 2px solid #fff; box-shadow: 0 0 0 1.5px var(--line); }
+.ed-sw.on { box-shadow: 0 0 0 2.5px var(--ink); }
+.lib-edit {
+  position: absolute; bottom: -6px; right: -6px; width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  background: #fff; border: 1.5px solid var(--line); cursor: pointer; font-size: .8rem;
+}
+.lib-edit:hover { border-color: var(--ink); }
 .ed-status { min-height: 1.3em; margin: .5rem 0 0; }
 
 /* ---------- live cursors + pokes ---------- */
