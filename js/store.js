@@ -43,10 +43,83 @@ const blobToDataURL = (blob) =>
     r.readAsDataURL(blob);
   });
 
+/* ---- cloud saving with an outbox ----
+   Every change goes into an outbox (also kept in localStorage) and is only removed once
+   Supabase confirms it. If the network drops or the login token is stale, it retries
+   instead of losing the change. */
+const OUTBOX_KEY = 'giterdun-outbox';
+let outbox = new Map(); // id -> row, or { id, deleted: true }
+let flushing = null;
+let retryTimer = 0;
+let warned = false;
+
+function saveOutbox() {
+  try {
+    localStorage.setItem(OUTBOX_KEY, JSON.stringify([...outbox.values()]));
+  } catch {}
+}
+function loadOutbox() {
+  try {
+    outbox = new Map((JSON.parse(localStorage.getItem(OUTBOX_KEY)) || []).map((r) => [r.id, r]));
+  } catch {
+    outbox = new Map();
+  }
+}
+function applyOutbox() {
+  for (const [id, r] of outbox) r.deleted ? items.delete(id) : items.set(id, r);
+}
+async function pushRow(row) {
+  const { error } = row.deleted ? await sb.from('items').delete().eq('id', row.id) : await sb.from('items').upsert(row);
+  return error;
+}
+async function flush() {
+  if (!configured) return;
+  if (flushing) return flushing;
+  flushing = (async () => {
+    let failed = false;
+    while (outbox.size && !failed) {
+      for (const [id, row] of [...outbox]) {
+        const error = await pushRow(row);
+        if (error) {
+          failed = true;
+          console.error('Giterdun save failed, will retry', error);
+          if (/jwt|token|auth/i.test(error.message || '')) await sb.auth.refreshSession().catch(() => {});
+          break;
+        }
+        if (outbox.get(id) === row) outbox.delete(id); // a newer edit may have queued meanwhile
+      }
+      saveOutbox();
+    }
+    clearTimeout(retryTimer);
+    if (failed) {
+      retryTimer = setTimeout(flush, 8000);
+      if (!warned) fail("Couldn't reach the cloud. Your changes are kept on this device and will keep retrying.");
+      warned = true;
+    } else {
+      warned = false;
+    }
+  })();
+  try {
+    await flushing;
+  } finally {
+    flushing = null;
+  }
+}
 async function persist(row) {
   if (!configured) return saveLocal();
-  const { error } = await sb.from('items').upsert(row);
-  if (error) fail("Couldn't save. Check your connection.", error);
+  outbox.set(row.id, row);
+  saveOutbox();
+  await flush();
+}
+
+// Re-download everything (after waking up or reconnecting, live updates may have been missed).
+async function refresh() {
+  const { data, error } = await sb.from('items').select('*').limit(5000);
+  if (error) return console.error(error);
+  items = new Map(data.map((r) => [r.id, r]));
+  applyOutbox();
+  emit();
+  flush();
 }
 
 async function loadRemote() {
@@ -56,20 +129,34 @@ async function loadRemote() {
     throw error;
   }
   items = new Map(data.map((r) => [r.id, r]));
+  loadOutbox();
+  applyOutbox();
+  flush();
   if (!channel) {
+    let hiddenAt = 0;
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) hiddenAt = Date.now();
+      else if (hiddenAt && Date.now() - hiddenAt > 20000) refresh();
+    });
+    addEventListener('online', () => {
+      flush();
+      refresh();
+    });
+    let joinedOnce = false;
     channel = sb
       .channel('items-feed')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'items' }, ({ eventType, new: n, old: o }) => {
-        if (eventType === 'DELETE') {
-          items.delete(o.id);
-        } else {
-          const cur = items.get(n.id);
-          if (cur && Date.parse(cur.updated_at) > Date.parse(n.updated_at)) return; // stale echo
-          items.set(n.id, n);
-        }
+        const id = eventType === 'DELETE' ? o.id : n.id;
+        if (outbox.has(id)) return; // we have a newer local edit still on its way up
+        if (eventType === 'DELETE') items.delete(id);
+        else items.set(id, n);
         emit();
       })
-      .subscribe();
+      .subscribe((status) => {
+        if (status !== 'SUBSCRIBED') return;
+        if (joinedOnce) refresh(); // reconnected: catch up on anything missed
+        joinedOnce = true;
+      });
   }
 }
 
@@ -154,8 +241,9 @@ export const store = {
     items.delete(id);
     emit();
     if (!configured) return saveLocal();
-    const { error } = await sb.from('items').delete().eq('id', id);
-    if (error) fail("Couldn't delete. Check your connection.", error);
+    outbox.set(id, { id, deleted: true });
+    saveOutbox();
+    await flush();
   },
   async bulkPut(rows) {
     const now = new Date().toISOString();

@@ -302,11 +302,13 @@ button.chip:hover { background: var(--ink); color: #fff; }
 @media (hover: none) { .cheer .x { opacity: 1; } }
 
 /* ---------- modal ---------- */
-.backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(47, 42, 36, .45); display: grid; place-items: center; padding: 16px; animation: fade .15s; }
+.backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(47, 42, 36, .45); display: grid; place-items: center; padding: 16px; }
+.backdrop.anim { animation: fade .15s; }
+.backdrop.anim .sheet { animation: pop .18s ease-out; }
 .sheet {
   position: relative; width: min(720px, 100%); max-height: calc(100vh - 32px); overflow: auto;
   background: var(--card); border: 2px solid var(--ink); border-radius: 18px; padding: 1.6rem 1.5rem 1.4rem;
-  box-shadow: 6px 6px 0 var(--ink); animation: pop .18s ease-out;
+  box-shadow: 6px 6px 0 var(--ink);
 }
 .sheet h2 { font-size: 2.3rem; margin-bottom: .4rem; padding-right: 2rem; }
 .close { position: absolute; top: .7rem; right: .7rem; font-size: 1.6rem; }
@@ -357,6 +359,21 @@ button.chip:hover { background: var(--ink); color: #fff; }
 .lib-item > button:first-child:hover { border-color: var(--accent); transform: rotate(-3deg); }
 .lib-item img { max-width: 100%; max-height: 100%; }
 .lib-item .x { position: absolute; top: -6px; right: -6px; background: #fff; border: 1.5px solid var(--line); border-radius: 50%; width: 24px; height: 24px; padding: 0; font-size: 1rem; }
+
+/* ---------- sticker cleanup editor ---------- */
+.ed-tools { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: .8rem 0; }
+.ed-tol { flex-direction: row; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.ed-tol input { padding: 0; width: 120px; accent-color: var(--accent); }
+.ed-tol small { color: var(--muted); font-weight: 600; }
+.ed-stage {
+  display: grid; place-items: center; padding: .6rem; border-radius: 12px; border: 1.5px solid var(--line);
+  background-color: #fff;
+  background-image: linear-gradient(45deg, #eee 25%, transparent 25%), linear-gradient(-45deg, #eee 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #eee 75%), linear-gradient(-45deg, transparent 75%, #eee 75%);
+  background-size: 18px 18px; background-position: 0 0, 0 9px, 9px -9px, -9px 0;
+}
+#ed-canvas { display: block; max-width: 100%; max-height: 52vh; cursor: crosshair; touch-action: manipulation; }
+.ed-status { min-height: 1.3em; margin: .5rem 0 0; }
 
 /* ---------- live cursors + pokes ---------- */
 #cursors { position: absolute; inset: 0; pointer-events: none; z-index: 25; overflow: hidden; }

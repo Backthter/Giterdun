@@ -1,4 +1,4 @@
-import { store } from './store.js';
+import { store, uid } from './store.js';
 
 /* ================= constants ================= */
 const STATUSES = [
@@ -138,6 +138,14 @@ function isEditing() {
   const a = document.activeElement;
   return !!(a && a.matches('input:not([type=checkbox]):not([type=radio]):not([type=file]), textarea') && a.closest('#view, #modal'));
 }
+// Only touch the DOM when the markup actually changed. Saves echoing back from Supabase
+// produce identical markup, so they no longer rebuild the page or wipe half-filled forms.
+function setHTML(el, html) {
+  if (el._html === html) return false;
+  el._html = html;
+  el.innerHTML = html;
+  return true;
+}
 function render(force = false) {
   if (!force && isEditing()) {
     ui.pending = true;
@@ -147,8 +155,8 @@ function render(force = false) {
   const s = S();
   document.documentElement.style.setProperty('--accent', ui.route === 'together' ? 'var(--together)' : s.colors[ui.route]);
   document.title = ui.route === 'together' ? 'Giterdun · Together' : `Giterdun · ${s.names[ui.route]}`;
-  $('#nav').innerHTML = navHTML();
-  $('#view').innerHTML = ui.route === 'together' ? togetherView() : personalView(ui.route);
+  setHTML($('#nav'), navHTML());
+  setHTML($('#view'), ui.route === 'together' ? togetherView() : personalView(ui.route));
   renderStickers();
   renderModal();
   renderDrawer();
@@ -630,18 +638,26 @@ function renderModal() {
   const m = $('#modal');
   const html = ui.modal?.();
   if (!html) {
-    const wasOpen = !!m.innerHTML;
+    const wasOpen = !!m._html;
     ui.modal = null;
-    m.innerHTML = '';
+    setHTML(m, '');
     document.body.classList.remove('modal-open');
+    if (wasOpen && ui.modalClosed) ui.modalClosed(); // e.g. the sticker editor was cancelled
     // Removing a focused input fires no focusout, so flush any render we deferred while typing.
     if (wasOpen && ui.pending) setTimeout(() => render(), 0);
     return;
   }
   document.body.classList.add('modal-open');
+  const opening = !m._html;
   const scroll = $('#modal .sheet')?.scrollTop || 0;
-  m.innerHTML = `<div class="backdrop" data-act="closeModal"><div class="sheet" role="dialog" aria-modal="true">
-    <button type="button" class="x close" data-act="closeModal" aria-label="Close">×</button>${html}</div></div>`;
+  const changed = setHTML(
+    m,
+    `<div class="backdrop" data-act="closeModal"><div class="sheet" role="dialog" aria-modal="true">
+    <button type="button" class="x close" data-act="closeModal" aria-label="Close">×</button>${html}</div></div>`
+  );
+  if (!changed) return;
+  // Only animate when the pop-up first opens, never when its contents refresh.
+  if (opening) m.firstElementChild.classList.add('anim');
   $('#modal .sheet').scrollTop = scroll;
 }
 
@@ -697,7 +713,7 @@ function renderStickers() {
   const list = byType('sticker')
     .filter((s) => s.data.page === ui.route)
     .sort((a, b) => (a.data.z || 0) - (b.data.z || 0));
-  layer.innerHTML = list
+  layer._html = layer.innerHTML = list
     .map((s) => {
       const sel = ui.arranging && ui.selected === s.id;
       return `<div class="sticker ${sel ? 'sel' : ''}" data-sticker="${s.id}" style="left:${s.data.x}%;top:${s.data.y}px;width:${s.data.w}px;--rot:${s.data.rot || 0}deg">
@@ -722,15 +738,15 @@ function renderDrawer() {
   const dr = $('#drawer');
   if (!ui.arranging) {
     dr.hidden = true;
-    dr.innerHTML = '';
+    setHTML(dr, '');
     return;
   }
   dr.hidden = false;
   const lib = byType('stickerlib').sort((a, b) => (a.data.createdAt || 0) - (b.data.createdAt || 0));
-  dr.innerHTML = `<div class="drawer-head">
+  setHTML(dr, `<div class="drawer-head">
       <strong>Sticker book</strong>
       <span class="muted small">Tap a sticker to stick it on this page · drag to move · tap one on the page to rotate, resize or remove</span>
-      <label class="btn">⬆ Upload PNGs<input type="file" accept="image/png,image/webp,image/gif,image/jpeg" multiple data-upload hidden></label>
+      <label class="btn">⬆ Upload images<input type="file" accept="image/png,image/webp,image/gif,image/jpeg" multiple data-upload hidden></label>
       <button type="button" class="btn solid" data-act="toggleArrange">Done</button>
     </div>
     <div class="lib">${
@@ -739,30 +755,296 @@ function renderDrawer() {
           (l) => `<div class="lib-item"><button type="button" data-act="placeSticker" data-id="${l.id}" aria-label="Place sticker"><img src="${esc(l.data.src)}" alt=""></button>
         <button type="button" class="x" data-act="libDel" data-id="${l.id}" aria-label="Remove from sticker book">×</button></div>`
         )
-        .join('') || '<p class="empty">Your sticker book is empty. Upload some PNGs you love! (Transparent backgrounds look best.)</p>'
-    }</div>`;
+        .join('') || '<p class="empty">Your sticker book is empty. Upload PNGs or photos you love. You can erase backgrounds as you add them!</p>'
+    }</div>`);
 }
-async function shrink(file, max = 420) {
-  const bmp = await createImageBitmap(file);
-  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+// Draw an image (or canvas) onto a new canvas no bigger than `max` px on its longest side.
+function toCanvas(src, max) {
+  const w = src.width;
+  const h = src.height;
+  const k = Math.min(1, max / Math.max(w, h));
   const c = document.createElement('canvas');
-  c.width = Math.max(1, Math.round(bmp.width * k));
-  c.height = Math.max(1, Math.round(bmp.height * k));
-  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  return new Promise((r) => c.toBlob(r, 'image/webp', 0.9));
+  c.width = Math.max(1, Math.round(w * k));
+  c.height = Math.max(1, Math.round(h * k));
+  c.getContext('2d', { willReadFrequently: true }).drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+const canvasBlob = (c) => new Promise((r) => c.toBlob(r, 'image/webp', 0.9));
+function hasTransparency(c) {
+  const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data;
+  for (let i = 3; i < d.length; i += 16) if (d[i] < 250) return true; // sample every 4th pixel
+  return false;
 }
 async function uploadStickers(files) {
   for (const file of files) {
     try {
-      const blob = await shrink(file);
+      const bmp = await createImageBitmap(file);
+      const work = toCanvas(bmp, 700);
+      // PNGs that are already cut out go straight in; anything with a solid background opens the cleanup editor.
+      const blob = hasTransparency(work) ? await canvasBlob(toCanvas(work, 420)) : await openCleanup(work, file.name);
+      if (!blob) continue;
       const src = await store.uploadImage(blob);
       await store.put({ owner: 'shared', type: 'stickerlib', data: { src, name: file.name, createdAt: Date.now() } });
+      toast('Added to the sticker book ✓');
     } catch (err) {
       console.error(err);
       toast(`Couldn't add ${file.name}`);
     }
   }
 }
+
+/* ---------- sticker cleanup: magic eraser + AI cutout ---------- */
+let ed = null;
+
+function cleanupModal() {
+  return `<p class="kicker">Make it a sticker</p>
+    <h2>Remove the background</h2>
+    <p class="muted small">Click the background to erase it, and click more spots to erase more. For photos, try ✨ Smart cutout.</p>
+    <div class="ed-tools">
+      <button type="button" class="btn" data-act="edAuto">🪄 Erase edges</button>
+      <button type="button" class="btn" data-act="edAI">✨ Smart cutout</button>
+      <label class="ed-tol">How fussy <input type="range" min="2" max="60" value="18" data-ed-tol aria-label="Eraser tolerance"><small>less ↔ more</small></label>
+      <button type="button" class="btn ghost" data-act="edUndo">↶ Undo</button>
+      <button type="button" class="btn ghost" data-act="edReset">Reset</button>
+    </div>
+    <div class="ed-stage"><canvas id="ed-canvas" aria-label="Sticker preview. Click the background to erase it."></canvas></div>
+    <p class="ed-status muted small" role="status"></p>
+    <div class="row between">
+      <button type="button" class="btn ghost" data-act="edSkip">Skip this one</button>
+      <div class="row" style="margin:0"><button type="button" class="btn ghost" data-act="edKeep">Keep background</button>
+      <button type="button" class="btn solid" data-act="edSave">Add sticker</button></div>
+    </div>`;
+}
+function openCleanup(canvas, name) {
+  return new Promise((resolve) => {
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const orig = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    ed = { canvas, ctx, orig, undo: [], name, resolve, busy: false };
+    ui.modalClosed = () => finishCleanup(null);
+    openModal(cleanupModal);
+    const view = $('#ed-canvas');
+    view.width = canvas.width;
+    view.height = canvas.height;
+    drawEd();
+  });
+}
+function finishCleanup(blob) {
+  if (!ed) return;
+  const { resolve } = ed;
+  ed = null;
+  ui.modalClosed = null;
+  if (ui.modal === cleanupModal) {
+    ui.modal = null;
+    renderModal();
+  }
+  resolve(blob);
+}
+function drawEd() {
+  const v = $('#ed-canvas');
+  if (!ed || !v) return;
+  v.getContext('2d').putImageData(ed.ctx.getImageData(0, 0, ed.canvas.width, ed.canvas.height), 0, 0);
+}
+const edStatus = (msg) => {
+  const s = $('.ed-status');
+  if (s) s.textContent = msg;
+};
+function edSnapshot() {
+  ed.undo.push(ed.ctx.getImageData(0, 0, ed.canvas.width, ed.canvas.height));
+  if (ed.undo.length > 15) ed.undo.shift();
+}
+const edTolerance = () => +($('[data-ed-tol]')?.value || 18);
+
+// Flood-fill erase from the seed pixels. Pixels close in colour to the seed vanish; ones a bit
+// further away fade out partly, which softens the edge and avoids a hard white halo.
+function floodErase(img, seeds, tolPct) {
+  const { width: w, height: h, data: d } = img;
+  const thr = (tolPct / 100) * 441;
+  const seen = new Uint8Array(w * h);
+  const stack = [];
+  for (const s of seeds) {
+    if (seen[s] || d[s * 4 + 3] === 0) continue;
+    const r0 = d[s * 4], g0 = d[s * 4 + 1], b0 = d[s * 4 + 2];
+    stack.push(s);
+    seen[s] = 1;
+    while (stack.length) {
+      const p = stack.pop();
+      const i = p * 4;
+      d[i + 3] = 0;
+      const x = p % w;
+      const y = (p - x) / w;
+      const nbrs = [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1];
+      for (const q of nbrs) {
+        if (q < 0 || seen[q]) continue;
+        const j = q * 4;
+        if (d[j + 3] === 0) {
+          seen[q] = 1;
+          stack.push(q);
+          continue;
+        }
+        const dist = Math.hypot(d[j] - r0, d[j + 1] - g0, d[j + 2] - b0);
+        if (dist <= thr) {
+          seen[q] = 1;
+          stack.push(q);
+        } else if (dist < thr * 2) {
+          d[j + 3] = Math.min(d[j + 3], Math.round(((dist - thr) / thr) * 255));
+        }
+      }
+    }
+  }
+}
+function edEraseAt(clientX, clientY) {
+  const v = $('#ed-canvas');
+  const r = v.getBoundingClientRect();
+  const x = Math.floor(((clientX - r.left) / r.width) * v.width);
+  const y = Math.floor(((clientY - r.top) / r.height) * v.height);
+  if (x < 0 || y < 0 || x >= v.width || y >= v.height) return;
+  edSnapshot();
+  const img = ed.ctx.getImageData(0, 0, v.width, v.height);
+  floodErase(img, [y * v.width + x], edTolerance());
+  ed.ctx.putImageData(img, 0, 0);
+  drawEd();
+  edStatus('');
+}
+
+// Smart cutout: RMBG-1.4 running in the browser via transformers.js. Downloaded only on first use, then cached.
+const TRANSFORMERS_CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1/+esm';
+let aiPromise = null;
+function loadAI(onProgress) {
+  aiPromise ||= (async () => {
+    const T = await import(TRANSFORMERS_CDN);
+    T.env.allowLocalModels = false;
+    const model = await T.AutoModel.from_pretrained('briaai/RMBG-1.4', {
+      config: { model_type: 'custom' },
+      dtype: 'q8',
+      progress_callback: (p) => p.status === 'progress' && /\.onnx$/.test(p.file) && onProgress(p.progress),
+    });
+    const processor = await T.AutoProcessor.from_pretrained('briaai/RMBG-1.4', {
+      config: {
+        do_normalize: true,
+        do_pad: false,
+        do_rescale: true,
+        do_resize: true,
+        image_mean: [0.5, 0.5, 0.5],
+        feature_extractor_type: 'ImageFeatureExtractor',
+        image_std: [1, 1, 1],
+        resample: 2,
+        rescale_factor: 0.00392156862745098,
+        size: { width: 1024, height: 1024 },
+      },
+    });
+    return { T, model, processor };
+  })().catch((err) => {
+    aiPromise = null;
+    throw err;
+  });
+  return aiPromise;
+}
+async function edSmartCutout() {
+  if (ed.busy) return;
+  ed.busy = true;
+  const mine = ed;
+  edStatus('Loading the cutout AI… (about 45 MB the first time, then it’s saved)');
+  try {
+    const { T, model, processor } = await loadAI((pct) => edStatus(`Downloading the cutout AI… ${Math.round(pct)}% (first time only)`));
+    if (ed !== mine) return;
+    edStatus('Cutting out… this can take a few seconds');
+    const src = document.createElement('canvas');
+    src.width = ed.orig.width;
+    src.height = ed.orig.height;
+    src.getContext('2d').putImageData(ed.orig, 0, 0);
+    const image = await T.RawImage.fromURL(src.toDataURL('image/png'));
+    const { pixel_values } = await processor(image);
+    const { output } = await model({ input: pixel_values });
+    const mask = await T.RawImage.fromTensor(output[0].mul(255).to('uint8')).resize(image.width, image.height);
+    if (ed !== mine) return;
+    edSnapshot();
+    const img = ed.ctx.getImageData(0, 0, ed.canvas.width, ed.canvas.height);
+    const step = mask.channels || 1;
+    for (let p = 0; p < img.width * img.height; p++) img.data[p * 4 + 3] = Math.min(img.data[p * 4 + 3], mask.data[p * step]);
+    ed.ctx.putImageData(img, 0, 0);
+    drawEd();
+    edStatus('Done! Use the eraser to tidy any leftovers.');
+  } catch (err) {
+    console.error(err);
+    edStatus("Smart cutout didn't work on this device. The magic eraser still works.");
+  } finally {
+    mine.busy = false;
+  }
+}
+
+// Crop away transparent borders so the sticker hugs its shape, then shrink for upload.
+async function edExport(keepBackground) {
+  const c = ed.canvas;
+  if (keepBackground) {
+    const o = document.createElement('canvas');
+    o.width = ed.orig.width;
+    o.height = ed.orig.height;
+    o.getContext('2d').putImageData(ed.orig, 0, 0);
+    return canvasBlob(toCanvas(o, 420));
+  }
+  const { data, width: w, height: h } = ed.ctx.getImageData(0, 0, c.width, c.height);
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++)
+      if (data[(y * w + x) * 4 + 3] > 12) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+  if (x1 < 0) return null;
+  const crop = document.createElement('canvas');
+  crop.width = x1 - x0 + 1;
+  crop.height = y1 - y0 + 1;
+  crop.getContext('2d').drawImage(c, x0, y0, crop.width, crop.height, 0, 0, crop.width, crop.height);
+  return canvasBlob(toCanvas(crop, 420));
+}
+
+document.addEventListener('click', (e) => {
+  if (ed && !ed.busy && e.target.id === 'ed-canvas') edEraseAt(e.clientX, e.clientY);
+});
+const edActions = {
+  edAuto() {
+    if (!ed || ed.busy) return;
+    edSnapshot();
+    const { width: w, height: h } = ed.canvas;
+    const img = ed.ctx.getImageData(0, 0, w, h);
+    const seeds = [];
+    for (let x = 0; x < w; x++) seeds.push(x, (h - 1) * w + x);
+    for (let y = 0; y < h; y++) seeds.push(y * w, y * w + w - 1);
+    floodErase(img, seeds, edTolerance());
+    ed.ctx.putImageData(img, 0, 0);
+    drawEd();
+    edStatus('Erased everything touching the edges. Click spots to erase more, or Undo.');
+  },
+  edAI() {
+    if (ed) edSmartCutout();
+  },
+  edUndo() {
+    if (!ed || ed.busy || !ed.undo.length) return;
+    ed.ctx.putImageData(ed.undo.pop(), 0, 0);
+    drawEd();
+  },
+  edReset() {
+    if (!ed || ed.busy) return;
+    edSnapshot();
+    ed.ctx.putImageData(ed.orig, 0, 0);
+    drawEd();
+  },
+  async edSave() {
+    if (!ed || ed.busy) return;
+    const blob = await edExport(false);
+    if (!blob) return edStatus("There's nothing left! Undo or Reset and try again.");
+    finishCleanup(blob);
+  },
+  async edKeep() {
+    if (!ed || ed.busy) return;
+    finishCleanup(await edExport(true));
+  },
+  edSkip() {
+    finishCleanup(null);
+  },
+};
 const maxZ = () => Math.max(0, ...byType('sticker').map((s) => s.data.z || 0));
 
 document.addEventListener('pointerdown', (e) => {
@@ -989,13 +1271,18 @@ const forms = {
     else store.put({ owner, type: 'event', data: { title: fd.text.trim(), date, time: fd.time || '', createdAt: Date.now() } });
     refocus('day');
   },
-  async project(fd, f) {
-    const row = await store.put({
+  project(fd, f) {
+    if (f.dataset.busy) return; // no double-creates from a second click
+    f.dataset.busy = '1';
+    // Pick the id up front and switch the pop-up straight away, instead of waiting for the network.
+    const id = uid();
+    store.put({
+      id,
       owner: f.dataset.owner,
       type: 'project',
       data: { name: fd.name.trim(), org: fd.org, location: fd.location, kind: fd.kind, status: fd.status, deadline: fd.deadline, link: fd.link, notes: fd.notes, statusAt: Date.now(), createdAt: Date.now() },
     });
-    ui.modal = () => projectModal(row.id);
+    ui.modal = () => projectModal(id);
     render(true);
   },
   cheer(fd, f) {
@@ -1036,7 +1323,7 @@ const forms = {
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
-  actions[el.dataset.act]?.(el, e);
+  (actions[el.dataset.act] || edActions[el.dataset.act])?.(el, e);
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && ui.modal) {
@@ -1144,7 +1431,7 @@ function onPeers(list) {
   const before = JSON.stringify(ui.peers.map((p) => [p.key, p.who, p.page]));
   ui.peers = list.filter((p) => p && p.key !== store.liveKey);
   for (const k of cursors.keys()) if (!ui.peers.some((p) => p.key === k && p.page === ui.route)) removeCursor(k);
-  if (JSON.stringify(ui.peers.map((p) => [p.key, p.who, p.page])) !== before) $('#nav').innerHTML = navHTML();
+  if (JSON.stringify(ui.peers.map((p) => [p.key, p.who, p.page])) !== before) setHTML($('#nav'), navHTML());
 }
 function showCursor(p) {
   if (!p || p.page !== ui.route) return removeCursor(p?.key);
