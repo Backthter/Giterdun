@@ -18,7 +18,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; }
+html, body { margin: 0; overflow-x: clip; }
 body {
   font-family: var(--body);
   color: var(--ink);
@@ -333,7 +333,9 @@ button.chip:hover { background: var(--ink); color: #fff; }
 .mode { margin: .4rem 0 0; }
 
 /* ---------- stickers ---------- */
-#stickers { position: absolute; inset: 0; pointer-events: none; z-index: 20; overflow: hidden; }
+/* The sticker layer spans the whole window (centred on the page), so stickers can sit in the side margins. */
+#stickers { position: absolute; top: 0; bottom: 0; left: 50%; width: 100vw; transform: translateX(-50%); pointer-events: none; z-index: 20; overflow: hidden; }
+.sticker.off { display: none; }
 .sticker { position: absolute; user-select: none; -webkit-user-select: none; }
 .sticker img { display: block; width: 100%; height: auto; transform: rotate(var(--rot)); filter: drop-shadow(0 3px 3px rgba(0,0,0,.18)); pointer-events: none; }
 #stickers.arranging .sticker { pointer-events: auto; cursor: grab; touch-action: none; }
@@ -372,7 +374,11 @@ button.chip:hover { background: var(--ink); color: #fff; }
     linear-gradient(45deg, transparent 75%, #eee 75%), linear-gradient(-45deg, transparent 75%, #eee 75%);
   background-size: 18px 18px; background-position: 0 0, 0 9px, 9px -9px, -9px 0;
 }
-#ed-canvas { display: block; max-width: 100%; max-height: 52vh; cursor: crosshair; touch-action: manipulation; }
+.ed-wrap { position: relative; display: inline-block; max-width: 100%; overflow: hidden; }
+#ed-canvas { display: block; max-width: 100%; max-height: 52vh; cursor: crosshair; touch-action: none; }
+.ed-brush { position: absolute; border-radius: 50%; border: 2px solid var(--late); box-shadow: 0 0 0 1px #fff; pointer-events: none; }
+.ed-brush.restore { border-color: var(--good); }
+.ed-modes { display: flex; gap: .3rem; flex-wrap: wrap; }
 .ed-status { min-height: 1.3em; margin: .5rem 0 0; }
 
 /* ---------- live cursors + pokes ---------- */

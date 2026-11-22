@@ -705,18 +705,26 @@ function settingsModal(welcome) {
 
 /* ================= stickers ================= */
 let drag = null;
+// Sticker x is `cx`: px from the middle of the page to the sticker's left edge, so stickers can live
+// in the empty side margins on wide screens. Older stickers stored x as a % of a 1200px-wide page.
+const stickerCx = (s) => (s.data.cx ?? (s.data.x / 100) * 1200 - 600);
+const halfView = () => document.documentElement.clientWidth / 2;
 function renderStickers() {
   const layer = $('#stickers');
   layer.classList.toggle('arranging', ui.arranging);
   document.body.classList.toggle('arranging', ui.arranging);
   if (drag) return;
+  const half = halfView();
   const list = byType('sticker')
     .filter((s) => s.data.page === ui.route)
     .sort((a, b) => (a.data.z || 0) - (b.data.z || 0));
-  layer._html = layer.innerHTML = list
+  setHTML(layer, list
     .map((s) => {
       const sel = ui.arranging && ui.selected === s.id;
-      return `<div class="sticker ${sel ? 'sel' : ''}" data-sticker="${s.id}" style="left:${s.data.x}%;top:${s.data.y}px;width:${s.data.w}px;--rot:${s.data.rot || 0}deg">
+      const cx = stickerCx(s);
+      // Stickers that don't fit on this screen (e.g. margin stickers on a phone) are hidden, not cut in half.
+      const off = !ui.arranging && (cx < -half || cx + s.data.w > half);
+      return `<div class="sticker ${sel ? 'sel' : ''} ${off ? 'off' : ''}" data-sticker="${s.id}" style="left:calc(50% + ${cx}px);top:${s.data.y}px;width:${s.data.w}px;--rot:${s.data.rot || 0}deg">
         <img src="${esc(s.data.src)}" alt="" draggable="false">
         ${
           sel
@@ -732,8 +740,13 @@ function renderStickers() {
         }
       </div>`;
     })
-    .join('');
+    .join(''));
 }
+let resizeTimer = 0;
+addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(renderStickers, 150);
+});
 function renderDrawer() {
   const dr = $('#drawer');
   if (!ui.arranging) {
@@ -770,18 +783,13 @@ function toCanvas(src, max) {
   return c;
 }
 const canvasBlob = (c) => new Promise((r) => c.toBlob(r, 'image/webp', 0.9));
-function hasTransparency(c) {
-  const d = c.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, c.width, c.height).data;
-  for (let i = 3; i < d.length; i += 16) if (d[i] < 250) return true; // sample every 4th pixel
-  return false;
-}
 async function uploadStickers(files) {
   for (const file of files) {
     try {
       const bmp = await createImageBitmap(file);
       const work = toCanvas(bmp, 700);
-      // PNGs that are already cut out go straight in; anything with a solid background opens the cleanup editor.
-      const blob = hasTransparency(work) ? await canvasBlob(toCanvas(work, 420)) : await openCleanup(work, file.name);
+      // Every upload goes through the editor, so you can always tidy it up first.
+      const blob = await openCleanup(work, file.name);
       if (!blob) continue;
       const src = await store.uploadImage(blob);
       await store.put({ owner: 'shared', type: 'stickerlib', data: { src, name: file.name, createdAt: Date.now() } });
@@ -798,20 +806,28 @@ let ed = null;
 
 function cleanupModal() {
   return `<p class="kicker">Make it a sticker</p>
-    <h2>Remove the background</h2>
-    <p class="muted small">Click the background to erase it, and click more spots to erase more. For photos, try ✨ Smart cutout.</p>
+    <h2>Tidy up your sticker</h2>
+    <p class="muted small">Pick a tool, then click or draw on the picture. Already see-through? Just hit Add sticker.</p>
     <div class="ed-tools">
       <button type="button" class="btn" data-act="edAuto">🪄 Erase edges</button>
       <button type="button" class="btn" data-act="edAI">✨ Smart cutout</button>
-      <label class="ed-tol">How fussy <input type="range" min="2" max="60" value="18" data-ed-tol aria-label="Eraser tolerance"><small>less ↔ more</small></label>
       <button type="button" class="btn ghost" data-act="edUndo">↶ Undo</button>
       <button type="button" class="btn ghost" data-act="edReset">Reset</button>
     </div>
-    <div class="ed-stage"><canvas id="ed-canvas" aria-label="Sticker preview. Click the background to erase it."></canvas></div>
-    <p class="ed-status muted small" role="status"></p>
+    <div class="ed-tools">
+      <div class="ed-modes" role="radiogroup" aria-label="Tool">
+        <button type="button" class="pill on" data-act="edMode" data-m="magic" role="radio" aria-checked="true">🪄 Magic eraser</button>
+        <button type="button" class="pill" data-act="edMode" data-m="erase" role="radio" aria-checked="false">🧽 Eraser</button>
+        <button type="button" class="pill" data-act="edMode" data-m="restore" role="radio" aria-checked="false">🖌️ Restore</button>
+      </div>
+      <label class="ed-tol" data-for="magic">How fussy <input type="range" min="2" max="60" value="18" data-ed-tol aria-label="Magic eraser tolerance"><small>less ↔ more</small></label>
+      <label class="ed-tol" data-for="brush" hidden>Brush size <input type="range" min="2" max="60" value="14" data-ed-size aria-label="Brush size"></label>
+    </div>
+    <div class="ed-stage"><div class="ed-wrap"><canvas id="ed-canvas" aria-label="Sticker preview"></canvas><div class="ed-brush" hidden></div></div></div>
+    <p class="ed-status muted small" role="status">Magic eraser: click the background to erase everything connected to it that's a similar colour.</p>
     <div class="row between">
       <button type="button" class="btn ghost" data-act="edSkip">Skip this one</button>
-      <div class="row" style="margin:0"><button type="button" class="btn ghost" data-act="edKeep">Keep background</button>
+      <div class="row" style="margin:0"><button type="button" class="btn ghost" data-act="edKeep">Use original</button>
       <button type="button" class="btn solid" data-act="edSave">Add sticker</button></div>
     </div>`;
 }
@@ -819,7 +835,7 @@ function openCleanup(canvas, name) {
   return new Promise((resolve) => {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const orig = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    ed = { canvas, ctx, orig, undo: [], name, resolve, busy: false };
+    ed = { canvas, ctx, orig, undo: [], name, resolve, busy: false, mode: 'magic', painting: null };
     ui.modalClosed = () => finishCleanup(null);
     openModal(cleanupModal);
     const view = $('#ed-canvas');
@@ -1000,10 +1016,103 @@ async function edExport(keepBackground) {
   return canvasBlob(toCanvas(crop, 420));
 }
 
-document.addEventListener('click', (e) => {
-  if (ed && !ed.busy && e.target.id === 'ed-canvas') edEraseAt(e.clientX, e.clientY);
+// Brushes: Eraser rubs pixels out, Restore paints the original picture back in. Soft edges either way.
+function edCanvasXY(e) {
+  const v = $('#ed-canvas');
+  const r = v.getBoundingClientRect();
+  return { x: ((e.clientX - r.left) / r.width) * v.width, y: ((e.clientY - r.top) / r.height) * v.height, scale: v.width / r.width, r };
+}
+const edBrushPx = () => +($('[data-ed-size]')?.value || 14); // radius in on-screen pixels
+function edDab(cx, cy, rad) {
+  const { width: w, height: h, data: d } = ed.work;
+  const o = ed.orig.data;
+  const restore = ed.mode === 'restore';
+  const x0 = Math.max(0, Math.floor(cx - rad));
+  const x1 = Math.min(w - 1, Math.ceil(cx + rad));
+  const y0 = Math.max(0, Math.floor(cy - rad));
+  const y1 = Math.min(h - 1, Math.ceil(cy + rad));
+  for (let y = y0; y <= y1; y++)
+    for (let x = x0; x <= x1; x++) {
+      const dist = Math.hypot(x - cx, y - cy);
+      if (dist > rad) continue;
+      const k = dist > rad * 0.6 ? (rad - dist) / (rad * 0.4) : 1; // feathered rim
+      const i = (y * w + x) * 4;
+      if (restore) {
+        d[i] = o[i];
+        d[i + 1] = o[i + 1];
+        d[i + 2] = o[i + 2];
+        d[i + 3] = Math.max(d[i + 3], Math.round(o[i + 3] * k));
+      } else {
+        d[i + 3] = Math.round(d[i + 3] * (1 - k));
+      }
+    }
+}
+function edStroke(to) {
+  const p = ed.painting;
+  const from = p.last || to;
+  const step = Math.max(1, p.rad / 3);
+  const n = Math.max(1, Math.ceil(Math.hypot(to.x - from.x, to.y - from.y) / step));
+  for (let s = 1; s <= n; s++) edDab(from.x + ((to.x - from.x) * s) / n, from.y + ((to.y - from.y) * s) / n, p.rad);
+  p.last = to;
+  ed.ctx.putImageData(ed.work, 0, 0);
+  drawEd();
+}
+function edMoveBrushRing(e) {
+  const ring = $('.ed-brush');
+  if (!ring) return;
+  const over = e.target.id === 'ed-canvas' || (ed?.painting && true);
+  if (!ed || ed.mode === 'magic' || !over) return (ring.hidden = true);
+  const wrap = ring.parentElement.getBoundingClientRect();
+  const size = edBrushPx() * 2;
+  ring.hidden = false;
+  ring.style.width = ring.style.height = size + 'px';
+  ring.style.left = e.clientX - wrap.left - size / 2 + 'px';
+  ring.style.top = e.clientY - wrap.top - size / 2 + 'px';
+  ring.classList.toggle('restore', ed.mode === 'restore');
+}
+document.addEventListener('pointerdown', (e) => {
+  if (!ed || ed.busy || e.target.id !== 'ed-canvas') return;
+  e.preventDefault();
+  if (ed.mode === 'magic') return edEraseAt(e.clientX, e.clientY);
+  edSnapshot();
+  const pt = edCanvasXY(e);
+  ed.work = ed.ctx.getImageData(0, 0, ed.canvas.width, ed.canvas.height);
+  ed.painting = { last: null, rad: Math.max(1, edBrushPx() * pt.scale) };
+  e.target.setPointerCapture?.(e.pointerId);
+  edStroke(pt);
 });
+document.addEventListener('pointermove', (e) => {
+  if (!ed) return;
+  edMoveBrushRing(e);
+  if (ed.painting) edStroke(edCanvasXY(e));
+});
+const edStopPaint = () => {
+  if (ed?.painting) {
+    ed.painting = null;
+    ed.work = null;
+  }
+};
+document.addEventListener('pointerup', edStopPaint);
+document.addEventListener('pointercancel', edStopPaint);
+
 const edActions = {
+  edMode(el) {
+    if (!ed) return;
+    ed.mode = el.dataset.m;
+    document.querySelectorAll('[data-act=edMode]').forEach((b) => {
+      b.classList.toggle('on', b === el);
+      b.setAttribute('aria-checked', b === el);
+    });
+    $('[data-for=magic]').hidden = ed.mode !== 'magic';
+    $('[data-for=brush]').hidden = ed.mode === 'magic';
+    edStatus(
+      {
+        magic: "Magic eraser: click the background to erase everything connected to it that's a similar colour.",
+        erase: 'Eraser: draw over anything you want gone.',
+        restore: 'Restore: paint over spots that got erased by mistake to bring them back.',
+      }[ed.mode]
+    );
+  },
   edAuto() {
     if (!ed || ed.busy) return;
     edSnapshot();
@@ -1066,8 +1175,7 @@ document.addEventListener('pointerdown', (e) => {
     ui.selected = id;
     renderStickers();
   }
-  const W = $('#stickers').clientWidth;
-  drag = { id, el: $(`[data-sticker="${id}"]`), sx: e.clientX, sy: e.clientY, x0: (s.data.x / 100) * W, y0: s.data.y, W, moved: false };
+  drag = { id, el: $(`[data-sticker="${id}"]`), sx: e.clientX, sy: e.clientY, x0: stickerCx(s), y0: s.data.y, w: s.data.w, half: halfView(), moved: false };
 });
 document.addEventListener('pointermove', (e) => {
   if (!drag) return;
@@ -1075,16 +1183,17 @@ document.addEventListener('pointermove', (e) => {
   const dy = e.clientY - drag.sy;
   if (!drag.moved && Math.hypot(dx, dy) < 3) return;
   drag.moved = true;
-  drag.nx = Math.min(100, Math.max(-10, ((drag.x0 + dx) / drag.W) * 100));
+  // Keep at least a third of the sticker on screen so it can always be grabbed again.
+  drag.nx = Math.round(Math.min(drag.half - drag.w / 3, Math.max(-drag.half - (drag.w * 2) / 3, drag.x0 + dx)));
   drag.ny = Math.max(0, drag.y0 + dy);
-  drag.el.style.left = drag.nx + '%';
+  drag.el.style.left = `calc(50% + ${drag.nx}px)`;
   drag.el.style.top = drag.ny + 'px';
 });
 document.addEventListener('pointerup', () => {
   if (!drag) return;
   const d = drag;
   drag = null;
-  if (d.moved) store.patch(d.id, { x: d.nx, y: d.ny });
+  if (d.moved) store.patch(d.id, { cx: d.nx, y: d.ny });
   else renderStickers();
 });
 
@@ -1211,18 +1320,13 @@ const actions = {
   placeSticker(el) {
     const lib = store.get(el.dataset.id);
     if (!lib) return;
-    const layer = $('#stickers');
-    const rect = layer.getBoundingClientRect();
+    const rect = $('#stickers').getBoundingClientRect();
     const w = 130;
-    const x = ((rect.width / 2 - w / 2) / rect.width) * 100 + (Math.random() * 16 - 8);
+    const cx = Math.round(-w / 2 + (Math.random() * 120 - 60));
     const y = Math.max(0, innerHeight / 2 - rect.top - w / 2 - 80);
-    store
-      .put({ owner: 'shared', type: 'sticker', data: { page: ui.route, src: lib.data.src, x, y, w, rot: Math.round(Math.random() * 20 - 10), z: maxZ() + 1 } })
-      .then((row) => {
-        ui.selected = row.id;
-        renderStickers();
-      });
-    ui.selected = null;
+    const id = uid();
+    ui.selected = id;
+    store.put({ id, owner: 'shared', type: 'sticker', data: { page: ui.route, src: lib.data.src, cx, y, w, rot: Math.round(Math.random() * 20 - 10), z: maxZ() + 1 } });
   },
   stRot(el) {
     const s = store.get(el.dataset.id);
