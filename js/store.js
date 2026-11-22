@@ -3,7 +3,7 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 
 const LS_KEY = 'giterdun-v1';
-const SUPABASE_CDN = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
+const SUPABASE_CDN = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.9/+esm';
 const configured = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
 
 let items = new Map();
